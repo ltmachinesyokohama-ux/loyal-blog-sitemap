@@ -2,6 +2,9 @@
 name: LOYAL BLOG SITEMAP
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     - cron: '15 0 * * *'
@@ -30,9 +33,11 @@ jobs:
           import xml.etree.ElementTree as ET
 
           HOME = 'https://www.bavariancustomirons.jp'
+
           PATTERN = re.compile(
               r'^https://www\.bavariancustomirons\.jp/blog/\d{4}/\d{2}/\d{2}/\d{6}$'
           )
+
           NS = 'http://www.sitemaps.org/schemas/sitemap/0.9'
           articles, seen = {}, set()
 
@@ -43,14 +48,17 @@ jobs:
           def collect(url, depth=0):
               if url in seen or depth > 4:
                   return
+
               if urllib.parse.urlparse(url).netloc != 'www.bavariancustomirons.jp':
                   raise ValueError('Unexpected sitemap host: ' + url)
 
               seen.add(url)
+
               req = urllib.request.Request(
                   url,
                   headers={'User-Agent': 'LOYAL-Sitemap-Generator/1.0'}
               )
+
               with urllib.request.urlopen(req, timeout=30) as response:
                   root = ET.fromstring(response.read())
 
@@ -65,8 +73,10 @@ jobs:
               elif kind == 'urlset':
                   for item in root.findall('{*}url'):
                       loc = node_text(item, 'loc').rstrip('/')
+
                       if PATTERN.fullmatch(loc):
                           mod = node_text(item, 'lastmod')
+
                           articles[loc] = (
                               mod if re.fullmatch(
                                   r'\d{4}-\d{2}-\d{2}', mod
@@ -87,10 +97,12 @@ jobs:
 
           os.makedirs('_site', exist_ok=True)
           ET.register_namespace('', NS)
+
           root = ET.Element('{' + NS + '}urlset')
 
           for loc, mod in sorted(articles.items()):
               item = ET.SubElement(root, '{' + NS + '}url')
+
               ET.SubElement(
                   item, '{' + NS + '}loc'
               ).text = loc
@@ -101,6 +113,7 @@ jobs:
                   ).text = mod
 
           ET.indent(root, space='  ')
+
           ET.ElementTree(root).write(
               '_site/blog-sitemap.xml',
               encoding='utf-8',
@@ -112,15 +125,30 @@ jobs:
           ) as f:
               f.write('\n'.join(sorted(articles)) + '\n')
 
+          # Google Search Console verification
           with open(
               '_site/index.html', 'w', encoding='utf-8'
           ) as f:
               f.write(
+                  '<!doctype html>'
+                  '<html lang="ja">'
+                  '<head>'
+                  '<meta charset="utf-8">'
+                  '<meta name="google-site-verification" '
+                  'content="bdSdgsWniwoRDCGll6OnahV4Z5FlqaNkVNqeZ89Vyjs">'
+                  '<title>LOYAL BLOG SITEMAP</title>'
+                  '</head>'
+                  '<body>'
+                  '<h1>LOYAL BLOG SITEMAP</h1>'
                   '<a href="blog-sitemap.xml">'
-                  'LOYAL Blog Sitemap</a>'
+                  'Blog Sitemap XML</a>'
+                  '</body>'
+                  '</html>'
               )
 
           print('Published Blog URLs:', len(articles))
+          print('Google Verification HTML: Generated')
+
           PY
 
       - uses: actions/configure-pages@v5

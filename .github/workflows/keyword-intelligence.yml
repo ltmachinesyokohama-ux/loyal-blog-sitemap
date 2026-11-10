@@ -1,0 +1,355 @@
+
+name: LOYAL JAPANESE KEYWORD INTELLIGENCE
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '10 1 * * 2'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: loyal-keyword-intelligence
+  cancel-in-progress: false
+
+jobs:
+  keywords:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install HTML parser
+        run: npm install --no-save --no-package-lock cheerio@1.0.0
+
+      - name: Collect and link Japanese tattoo terms
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const cheerio = require('cheerio');
+
+          const SITE = 'https://www.bavariancustomirons.jp';
+          const OUT = 'data/keyword-intelligence.json';
+          const PATTERN = /^https:\/\/www\.bavariancustomirons\.jp\/blog\/\d{4}\/\d{2}\/\d{2}\/\d{6}$/;
+
+          const GROUPS = [
+            ['blackwork','ブラックワーク',['ブラックワーク','Blackwork']],
+            ['blackout','ブラックアウト',['ブラックアウト','ブラックアーム']],
+            ['coverup','カバーアップ',['カバーアップ','カバー・アップ','タトゥー修正']],
+            ['botanical','ボタニカル・フローラル',['ボタニカル','フローラル','植物タトゥー','花のタトゥー']],
+            ['flowers','花の図柄',['ひまわり','牡丹','菊','桜','薔薇','バラ','蓮']],
+            ['sleeve','フルスリーブ',['フルスリーブ','ハーフスリーブ','スリーブタトゥー','腕一本','片腕']],
+            ['backpiece','バックピース',['バックピース','背中一面','背中のタトゥー','背中タトゥー']],
+            ['wabori','和彫',['和彫','額彫り','和彫り','日本伝統刺青','現代和彫']],
+            ['yobori','洋彫',['洋彫','洋彫り','西洋構造芸術','Western-style']],
+            ['small','ワンポイント',['ワンポイント','スモールタトゥー','小さなタトゥー']],
+            ['women','女性向け',['女性向け','ガールズタトゥー','レディースタトゥー']],
+            ['fine','ファインライン',['ファインライン','Fine line','極細線']],
+            ['abstract','アブストラクト',['アブストラクト','抽象タトゥー']],
+            ['gray','ブラック＆グレー',['ブラック＆グレー','ブラックアンドグレー','Black & Grey','B&G']],
+            ['price','料金・予算',['料金','料金表','値段','費用','予算','価格','相場']],
+            ['safety','施術・衛生',['衛生','滅菌','アフターケア','痛み','アレルギー','安全管理']],
+            ['machine','タトゥーマシン',['タトゥーマシン','タトゥーマシーン','FREIHEIT','ロータリータトゥー']]
+          ];
+
+          const SEEDS = [
+            'タトゥー 横浜','タトゥー 六本木','タトゥー 料金',
+            '女性 タトゥー','ワンポイント タトゥー','ボタニカル タトゥー',
+            'フルスリーブ タトゥー','ブラックワーク タトゥー',
+            'カバーアップ タトゥー','和彫','洋彫','タトゥーマシン'
+          ];
+
+          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+          const clean = s => String(s || '').replace(/\s+/g,' ').trim();
+          const normalize = s => clean(s).toLocaleLowerCase('ja-JP').replace(/[\s・･\-]/g,'');
+
+          async function get(url, timeout = 18000) {
+            const r = await fetch(url, {
+              headers: {
+                'user-agent':'LOYAL-Keyword-Research/1.0',
+                'accept-language':'ja-JP,ja;q=0.9'
+              },
+              signal: AbortSignal.timeout(timeout)
+            });
+            if (!r.ok) throw Error(`${r.status}: ${url}`);
+            return r.text();
+          }
+
+          async function blogURLs(url, seen = new Set(), depth = 0) {
+            if (seen.has(url) || depth > 4) return [];
+            if (new URL(url).host !== new URL(SITE).host) {
+              throw Error('Invalid sitemap host');
+            }
+            seen.add(url);
+
+            const xml = cheerio.load(await get(url), {xmlMode:true});
+            const nested = xml('sitemap > loc')
+              .map((_, el) => xml(el).text().trim()).get();
+
+            if (nested.length) {
+              const all = [];
+              for (const entry of nested) {
+                all.push(...await blogURLs(entry, seen, depth+1));
+              }
+              return all;
+            }
+
+            return xml('url > loc')
+              .map((_, el) => xml(el).text().trim()).get()
+              .map(s => s.replace(/\/$/,''))
+              .filter(s => PATTERN.test(s));
+          }
+
+          function parsePage(url, html) {
+            const $ = cheerio.load(html);
+            const title = clean(
+              ($('meta[property="og:title"]').attr('content') ||
+                $('title').first().text())
+                .split(/\s*[|｜]\s*LOYAL TATTOO/i)[0]
+            );
+            const description = clean(
+              $('meta[name="description"]').attr('content') || ''
+            );
+            const heading = clean(
+              $('main h1, article h1, main h2, article h2')
+                .slice(0,5)
+                .map((_,el)=>$(el).text()).get().join(' ')
+            );
+
+            const evidenceText = normalize(
+              `${title} ${description} ${heading}`
+            );
+            const groups = GROUPS.map(([id,label,aliases]) => {
+              const matched = aliases.filter(
+                a => evidenceText.includes(normalize(a))
+              );
+              return matched.length
+                ? {id,label,evidence:matched}
+                : null;
+            }).filter(Boolean);
+
+            return {url,title,description,groups};
+          }
+
+          async function suggestions() {
+            const found = new Map();
+            const errors = [];
+
+            for (const seed of SEEDS) {
+              try {
+                // Optional public autocomplete.
+                // This endpoint is unofficial and may change.
+                const api = new URL(
+                  'https://suggestqueries.google.com/complete/search'
+                );
+                api.search = new URLSearchParams({
+                  client:'firefox',
+                  hl:'ja',
+                  gl:'jp',
+                  q:seed
+                });
+
+                const response = JSON.parse(
+                  await get(api.toString(), 10000)
+                );
+
+                for (const raw of (
+                  Array.isArray(response[1]) ? response[1] : []
+                )) {
+                  const term = clean(raw);
+                  if (
+                    term.length >= 2 &&
+                    term.length <= 65 &&
+                    !found.has(term)
+                  ) {
+                    found.set(term, {
+                      term,
+                      source:'public_autocomplete_unofficial',
+                      seed
+                    });
+                  }
+                }
+              } catch (error) {
+                errors.push({
+                  seed,
+                  error:String(error).slice(0,100)
+                });
+              }
+              await delay(900);
+            }
+
+            return {terms:[...found.values()],errors};
+          }
+
+          function scoreTerm(term, page) {
+            const text = normalize(term);
+            const title = normalize(page.title);
+            let score = 0;
+
+            for (const group of page.groups) {
+              for (const alias of group.evidence) {
+                const key = normalize(alias);
+                if (text.includes(key)) {
+                  score += title.includes(key) ? 5 : 3;
+                }
+              }
+            }
+            return score;
+          }
+
+          (async () => {
+            const old = fs.existsSync(OUT)
+              ? JSON.parse(fs.readFileSync(OUT,'utf8'))
+              : {pages:[]};
+
+            const previous = new Map(
+              (old.pages || []).map(page => [page.url,page])
+            );
+
+            const urls = [...new Set(
+              await blogURLs(SITE+'/sitemap.xml')
+            )].sort();
+
+            if (urls.length < 200) {
+              throw Error(`Sitemap unusually small: ${urls.length}`);
+            }
+
+            const pages = [];
+            const errors = [];
+            let crawled = 0;
+
+            for (const url of urls) {
+              try {
+                const page = parsePage(url, await get(url));
+                pages.push(page);
+                crawled++;
+              } catch (error) {
+                if (previous.has(url)) {
+                  pages.push({
+                    ...previous.get(url),
+                    cached_previous:true
+                  });
+                } else {
+                  pages.push({
+                    url,title:'',description:'',
+                    groups:[],fetch_error:true
+                  });
+                }
+                errors.push({
+                  url,error:String(error).slice(0,120)
+                });
+              }
+              await delay(350);
+            }
+
+            const {terms,errors:suggestErrors} =
+              await suggestions();
+
+            const mapped = terms.map(s => ({
+              ...s,
+              related_urls:pages
+                .map(p=>({
+                  url:p.url,
+                  score:scoreTerm(s.term,p)
+                }))
+                .filter(v=>v.score >= 3)
+                .sort((a,b)=>b.score-a.score)
+                .slice(0,3)
+                .map(v=>v.url)
+            }));
+
+            const output = {
+              schema_version:'1.0.0',
+              site:SITE,
+              generated_at:new Date().toISOString(),
+              scope:'Japanese-language tattoo keyword discovery and article mapping',
+              note:'Page terms and optional autocomplete predictions. No verified search volume.',
+              blog_url_count:urls.length,
+              article_fetch_success:crawled,
+              article_fetch_errors:errors,
+              suggestion_errors:suggestErrors,
+              suggestions:mapped,
+              pages
+            };
+
+            fs.mkdirSync('data',{recursive:true});
+            fs.writeFileSync(
+              OUT,
+              JSON.stringify(output,null,2)+'\n'
+            );
+
+            const lines = [
+              '# LOYAL TATTOO — Japanese Tattoo Keyword Intelligence',
+              '',
+              `Updated: ${output.generated_at}`,
+              '',
+              `Official site: ${SITE}`,
+              '',
+              `Blog URLs: ${urls.length} / Page fetch success: ${crawled} / Autocomplete suggestions: ${mapped.length}`,
+              '',
+              'Keywords are observed page terms or optional public suggestions. Search volume is unverified.',
+              '',
+              '## Public search suggestions and related articles',
+              ''
+            ];
+
+            for (const s of mapped.filter(
+              s=>s.related_urls.length
+            )) {
+              lines.push(
+                `- **${s.term.replace(/[\[\]]/g,'')}** (${s.source}): `+
+                s.related_urls.map(
+                  url=>`[${url.split('/').slice(-4).join('/')}](${url})`
+                ).join(', ')
+              );
+            }
+
+            lines.push(
+              '',
+              '## Blog URL and confirmed page vocabulary',
+              ''
+            );
+
+            for (const p of pages) {
+              const tags = p.groups.map(
+                g=>`${g.label} (${g.evidence.join('・')})`
+              ).join(' / ') || 'Unclassified';
+
+              lines.push(
+                `- [${(p.title || p.url).replace(/[\[\]]/g,'').slice(0,110)}](${p.url}) — ${tags}`
+              );
+            }
+
+            fs.writeFileSync(
+              'KEYWORDS.md',
+              lines.join('\n')+'\n'
+            );
+
+            console.log(
+              `Blog ${urls.length}; fetched ${crawled}; suggestions ${mapped.length}; mapped ${mapped.filter(v=>v.related_urls.length).length}`
+            );
+          })().catch(e => {
+            console.error(e);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Commit keyword dataset
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add KEYWORDS.md data/keyword-intelligence.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Refresh Japanese tattoo keyword intelligence"
+            git push
+          fi
